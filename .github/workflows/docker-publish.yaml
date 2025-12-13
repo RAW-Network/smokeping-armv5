@@ -1,0 +1,88 @@
+name: Docker Image CI
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'Dockerfile'
+      - 'entrypoint.sh'
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set lowercase repository name
+        id: lower_repo_name
+        env:
+          FULL_REPO_NAME: ${{ github.repository }}
+        run: |
+          echo "REPO_LOWER=$(echo "$FULL_REPO_NAME" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build image (linux/arm/v5, local only)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/arm/v5
+          push: false
+          load: true
+          tags: smokeping:local
+
+      - name: Get Smokeping version from dpkg
+        id: get_version_from_image
+        run: |
+          RAW_VERSION=$(docker run --rm --entrypoint dpkg-query smokeping:local --showformat='${Version}' --show smokeping)
+          
+          echo "Raw version from dpkg: $RAW_VERSION"
+
+          CLEAN_VERSION=$(echo "$RAW_VERSION" | cut -d'-' -f1 | cut -d'+' -f1)
+
+          if [ -z "$CLEAN_VERSION" ]; then
+             echo "Failed to detect version from: $RAW_VERSION"
+             exit 1
+          fi
+
+          APP_VERSION="v$CLEAN_VERSION"
+
+          echo "Detected Smokeping version: $APP_VERSION"
+          echo "APP_VERSION=$APP_VERSION" >> "$GITHUB_OUTPUT"
+      
+      - name: Tag and push image to GHCR (Always Push)
+        run: |
+          IMAGE_LOCAL="smokeping:local"
+          REPO="ghcr.io/${{ steps.lower_repo_name.outputs.REPO_LOWER }}"
+          VERSION="${{ steps.get_version_from_image.outputs.APP_VERSION }}"
+
+          echo "Pushing to:"
+          echo "  $REPO:latest"
+          echo "  $REPO:$VERSION"
+
+          docker tag "$IMAGE_LOCAL" "$REPO:latest"
+          docker tag "$IMAGE_LOCAL" "$REPO:$VERSION"
+
+          docker push "$REPO:latest"
+          docker push "$REPO:$VERSION"
